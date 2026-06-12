@@ -209,8 +209,8 @@ export default function AccretionPage() {
     composer.addPass(new RenderPass(scene, camera))
     composer.addPass(new UnrealBloomPass(
       new THREE.Vector2(W, H),
-      1.2,  // intensity
-      0.6,  // radius
+      0.4,  // intensity
+      0.1,  // radius
       0.2   // luminance threshold
     ))
 
