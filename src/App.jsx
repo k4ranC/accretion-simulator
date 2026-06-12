@@ -9,19 +9,22 @@ export default function App() {
   const mountRef = useRef(null)
 
   useEffect(() => {
+    // --- Scene Setup ---
     const scene = new THREE.Scene()
     const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 10000)
+    // Slightly above the disk plane so we get a nice angled view
     camera.position.set(0, 50, 400)
     camera.lookAt(0, 0, 0)
 
     const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' })
     renderer.setSize(window.innerWidth, window.innerHeight)
     renderer.setPixelRatio(window.devicePixelRatio)
+    // Reinhard tone mapping keeps bloom from blowing out to pure white
     renderer.toneMapping = THREE.ReinhardToneMapping
     renderer.toneMappingExposure = 2.0
     mountRef.current.appendChild(renderer.domElement)
 
-    // Right click rotates, middle pans, left click reserved for spawning
+    // Left click spawns particles, right click rotates camera, middle pans
     const controls = new OrbitControls(camera, renderer.domElement)
     controls.enableDamping = true
     controls.mouseButtons = {
@@ -29,13 +32,16 @@ export default function App() {
       RIGHT: THREE.MOUSE.ROTATE
     }
 
-    // Black hole event horizon — pure black sphere acts as occluder
+    // --- Black Hole ---
+    // Pure black sphere — acts as an occluder so particles behind it are hidden
+    // This is what creates the shadow effect without needing any special shader
     const blackHoleGeo = new THREE.SphereGeometry(28, 64, 64)
     const blackHoleMat = new THREE.MeshBasicMaterial({ color: 0x000000 })
     const blackHole = new THREE.Mesh(blackHoleGeo, blackHoleMat)
     scene.add(blackHole)
 
-    // Dim star field for spatial context
+    // --- Star Field ---
+    // Kept very dim so it doesn't compete with the bloom effect
     const starsGeo = new THREE.BufferGeometry()
     const starPositions = []
     for (let i = 0; i < 3000; i++) {
@@ -48,13 +54,14 @@ export default function App() {
     starsGeo.setAttribute('position', new THREE.Float32BufferAttribute(starPositions, 3))
     scene.add(new THREE.Points(starsGeo, new THREE.PointsMaterial({ color: 0x888888, size: 0.8 })))
 
-    // Arrow shown while dragging — shows launch direction and speed
+    // Yellow arrow that appears while dragging to show launch direction and speed
     const arrowHelper = new THREE.ArrowHelper(
       new THREE.Vector3(1, 0, 0), new THREE.Vector3(), 0, 0xffff00, 4, 2
     )
     arrowHelper.visible = false
     scene.add(arrowHelper)
 
+    // Invisible plane used for raycasting mouse clicks into world space
     const spawnPlane = new THREE.Mesh(
       new THREE.PlaneGeometry(10000, 10000),
       new THREE.MeshBasicMaterial({ visible: false, side: THREE.DoubleSide })
@@ -64,16 +71,21 @@ export default function App() {
 
     const spawnRaycaster = new THREE.Raycaster()
 
+    // --- Physics Constants ---
+    // G and BLACK_HOLE_MASS are scaled for the simulation units, not real SI values
     const G = 50000
     const BLACK_HOLE_MASS = 100000
     const particles = []
 
+    // --- Particle Spawning ---
     function spawnParticle(worldPos, velocity) {
       let x, y, z, vx, vy, vz
       const isUserSpawned = worldPos !== null
 
       if (!isUserSpawned) {
-        // Random disk particle with circular orbital velocity: v = sqrt(GM/r)
+        // Place particle randomly in a flat disk around the black hole
+        // Initial velocity is circular orbital speed: v = sqrt(GM/r)
+        // This gives stable orbits at any radius without needing to tune anything
         const angle = Math.random() * Math.PI * 2
         const distance = Math.random() * 90 + 35
         x = Math.cos(angle) * distance
@@ -84,6 +96,7 @@ export default function App() {
         vy = (Math.random() - 0.5) * speed * 0.01
         vz = Math.cos(angle) * speed
       } else {
+        // User spawned — use the position and velocity from mouse input
         x = worldPos.x
         y = worldPos.y
         z = worldPos.z
@@ -92,7 +105,7 @@ export default function App() {
         vz = velocity.z
       }
 
-      // User spawned = yellow and slightly larger so they stand out
+      // User particles are yellow and slightly larger so they stand out from the disk
       const size = isUserSpawned ? 3 : Math.random() * 0.7 + 0.3
       const color = isUserSpawned ? 0xffff00 : 0xffffff
       const geo = new THREE.SphereGeometry(size, 8, 8)
@@ -101,7 +114,7 @@ export default function App() {
       mesh.position.set(x, y, z)
       scene.add(mesh)
 
-      // Trail shows the orbital path each particle takes
+      // Each particle gets a trail so you can see the orbital path it takes
       const trailGeo = new THREE.BufferGeometry()
       const trailPositions = new Float32Array(60 * 3)
       trailGeo.setAttribute('position', new THREE.BufferAttribute(trailPositions, 3))
@@ -122,10 +135,12 @@ export default function App() {
       })
     }
 
-    // Spawn initial accretion disk
+    // Populate the initial accretion disk
     for (let i = 0; i < 300; i++) spawnParticle(null, null)
 
-    // Project mouse click to world space at the same depth as the black hole
+    // --- Mouse to World Conversion ---
+    // Projects a screen click to a 3D world position at the same depth as the black hole
+    // Uses the camera distance to origin so it works at any zoom level
     function mouseToWorld(event) {
       const ndcX = (event.clientX / window.innerWidth) * 2 - 1
       const ndcY = -(event.clientY / window.innerHeight) * 2 + 1
@@ -136,6 +151,7 @@ export default function App() {
       return camera.position.clone().add(dir.multiplyScalar(distToOrigin))
     }
 
+    // --- Mouse Interaction ---
     let isDragging = false
     let dragStart = null
     let dragStartWorld = null
@@ -152,7 +168,8 @@ export default function App() {
       const dx = e.clientX - dragStart.x
       const dy = e.clientY - dragStart.y
 
-      // Only start drag after 5px movement — avoids accidental drags on clicks
+      // Wait for 5px of movement before treating it as a drag
+      // Prevents accidental drags when just clicking
       if (Math.sqrt(dx * dx + dy * dy) > 5) {
         isDragging = true
         const currentWorld = mouseToWorld(e)
@@ -171,11 +188,14 @@ export default function App() {
       if (e.button !== 0 || !dragStart || !dragStartWorld) return
 
       if (isDragging) {
+        // Drag — the drag vector becomes the launch velocity
+        // Multiplied by 50 to match the simulation's velocity scale
         const currentWorld = mouseToWorld(e)
         const velocity = currentWorld.clone().sub(dragStartWorld).multiplyScalar(50)
-        console.log('drag velocity:', velocity.x.toFixed(2), velocity.y.toFixed(2), velocity.z.toFixed(2))
-        console.log('velocity length:', velocity.length().toFixed(2))
         spawnParticle(dragStartWorld, velocity)
+      } else {
+        // Click — spawn stationary particle, gravity pulls it straight in
+        spawnParticle(dragStartWorld, new THREE.Vector3(0, 0, 0))
       }
 
       arrowHelper.visible = false
@@ -188,16 +208,19 @@ export default function App() {
     window.addEventListener('mousemove', onMouseMove)
     window.addEventListener('mouseup', onMouseUp)
 
-    // Bloom — makes fast infalling particles glow brighter
+    // --- Post Processing ---
+    // UnrealBloomPass makes bright fast-moving particles glow
+    // Simulates the intense radiation emitted by infalling matter
     const composer = new EffectComposer(renderer)
     composer.addPass(new RenderPass(scene, camera))
     composer.addPass(new UnrealBloomPass(
       new THREE.Vector2(window.innerWidth, window.innerHeight),
-      0.5, // strength
-      0.2, // radius
-      0.2 // threshold
+      0.5,  // intensity
+      0.2,  // radius
+      0.2   // luminance threshold
     ))
 
+    // --- Animation Loop ---
     const animate = () => {
       requestAnimationFrame(animate)
       const dt = 0.0008
@@ -209,7 +232,7 @@ export default function App() {
         const pos = p.mesh.position
         const dist = pos.length()
 
-        // Absorb into event horizon
+        // Remove particle if it crosses the event horizon
         if (dist < 28) {
           p.active = false
           scene.remove(p.mesh)
@@ -217,13 +240,13 @@ export default function App() {
           continue
         }
 
-        // Newtonian gravity: F = GMm/r², pointing toward black hole
+        // Newtonian gravity: F = GMm/r², direction toward black hole
         const forceMag = G * BLACK_HOLE_MASS * p.mass / (dist * dist)
         const acc = pos.clone().normalize().multiplyScalar(-forceMag / p.mass)
         p.velocity.addScaledVector(acc, dt)
         p.mesh.position.addScaledVector(p.velocity, dt)
 
-        // Update trail — rolling buffer of last 60 positions
+        // Keep a rolling buffer of the last 60 positions for the trail
         p.trailPoints.push(p.mesh.position.clone())
         if (p.trailPoints.length > 60) p.trailPoints.shift()
         const positions = p.trail.geometry.attributes.position.array
@@ -235,7 +258,8 @@ export default function App() {
         p.trail.geometry.attributes.position.needsUpdate = true
         p.trail.geometry.setDrawRange(0, p.trailPoints.length)
 
-        // Faster particles are hotter — keep user particles yellow
+        // Faster particles are hotter so they glow brighter
+        // Keep user spawned particles yellow so they're always visible
         if (!p.isUserSpawned) {
           const spd = p.velocity.length()
           const t = Math.min(spd / 20, 1)
@@ -277,7 +301,7 @@ export default function App() {
         fontFamily: 'monospace', fontSize: 13,
         pointerEvents: 'none'
       }}>
-        <div>LEFT CLICK — spawn particle</div>
+        <div>LEFT CLICK — spawn stationary particle</div>
         <div>LEFT DRAG — launch with velocity</div>
         <div>RIGHT DRAG — rotate camera</div>
         <div>SCROLL — zoom</div>
