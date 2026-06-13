@@ -80,7 +80,7 @@ export default function Hero() {
           margin: '0 0 16px 0',
           lineHeight: 1.1
         }}>
-          Karan
+          Karan Chugani
         </h1>
         <p style={{
           color: 'rgba(255,255,255,0.5)',
