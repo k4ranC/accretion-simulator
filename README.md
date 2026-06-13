@@ -1,16 +1,36 @@
-# React + Vite
+# Black Hole Accretion Simulator
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+A real-time 3D gravitational simulation of particle dynamics around a black hole, built with Three.js and React.
 
-Currently, two official plugins are available:
+Particles orbit the black hole under Newtonian gravity, spiral inward as they lose energy through interactions, and get absorbed when they cross the event horizon. The glowing accretion disk emerges naturally from the physics — no textures or fake effects.
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+## Physics
 
-## React Compiler
+- Newtonian gravity: F = GMm/r², computed each frame for every particle
+- Initial disk particles given circular orbital velocity v = sqrt(GM/r) for stable orbits
+- Particle brightness scales with orbital speed — faster infalling matter radiates more
+- Bloom post-processing simulates the intense radiation emitted by the accretion disk
+- The black hole shadow is a pure black sphere acting as an occluder — no shader needed
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+## Controls
 
-## Expanding the ESLint configuration
+| Input | Action |
+|---|---|
+| Left click | Spawn stationary particle — falls straight into the black hole |
+| Left drag | Launch particle with custom velocity — direction and length set the trajectory |
+| Right drag | Rotate camera |
+| Scroll | Zoom |
 
-If you are developing a production application, we recommend using TypeScript with type-aware lint rules enabled. Check out the [TS template](https://github.com/vitejs/vite/tree/main/packages/create-vite/template-react-ts) for information on how to integrate TypeScript and [`typescript-eslint`](https://typescript-eslint.io) in your project.
+## Running locally
+
+```bash
+npm install
+npm run dev
+```
+
+## Built with
+
+- Three.js — 3D rendering and physics
+- React — component structure
+- Vite — build tool
+- UnrealBloomPass — glow post-processing
