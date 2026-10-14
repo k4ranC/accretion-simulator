@@ -11,6 +11,8 @@ const BLACK_HOLE_MASS = 100000
 const BASE_HORIZON = 28 // Schwarzschild radius (Rs) at mass x1
 const BASE_DT = 0.0008
 const MAX_PARTICLES = 1500
+// Launch speed per world unit of drag. Large enough that a modest drag beats escape speed.
+const LAUNCH_GAIN = 90
 
 const EXPERIMENTS = {
   fall: {
@@ -327,7 +329,7 @@ export default function App() {
         const dir = currentWorld.clone().sub(dragStartWorld)
         const length = dir.length()
         if (length > 0) {
-          const li = launchInfo(dragStartWorld, dir.clone().multiplyScalar(50))
+          const li = launchInfo(dragStartWorld, dir.clone().multiplyScalar(LAUNCH_GAIN))
           dragInfo = li
           // Green = bound orbit, yellow = near circular, red = will escape
           const col = li.speed >= li.escape ? 0xff5555 : Math.abs(li.speed / li.circular - 1) < 0.1 ? 0x4fd1c5 : 0xffff00
@@ -345,7 +347,7 @@ export default function App() {
       let p
       if (isDragging) {
         const currentWorld = mouseToWorld(e)
-        const velocity = currentWorld.clone().sub(dragStartWorld).multiplyScalar(50)
+        const velocity = currentWorld.clone().sub(dragStartWorld).multiplyScalar(LAUNCH_GAIN)
         p = spawnParticle(dragStartWorld, velocity)
       } else {
         p = spawnParticle(dragStartWorld, new THREE.Vector3(0, 0, 0))
