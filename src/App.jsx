@@ -474,6 +474,12 @@ export default function App() {
 
     const timer = setInterval(() => {
       const desc = describe(tracked)
+      // Tracked particle wears its outcome: red escaping, teal in a bound orbit, orange on a collision course
+      if (desc && !desc.gone) {
+        const col = desc.verdict.startsWith('Escaping') || desc.verdict.startsWith('Flyby') ? 0xff5555
+          : desc.verdict.startsWith('On a collision') ? 0xff9800 : 0x4fd1c5
+        tracked.mesh.material.color.set(col)
+      }
       // Challenge: three orbits, nearly circular, without falling in
       if (desc && !desc.gone && !tracked.solved && tracked.orbits >= 3 && desc.ecc < 0.15) {
         tracked.solved = true
