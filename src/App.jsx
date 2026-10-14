@@ -1,12 +1,72 @@
-import { useEffect, useRef } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import * as THREE from 'three'
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js'
 import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js'
 import { RenderPass } from 'three/addons/postprocessing/RenderPass.js'
 import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js'
 
+// Physics constants — scaled for simulation units, not real SI values
+const G = 50000
+const BLACK_HOLE_MASS = 100000
+const BASE_HORIZON = 28 // Schwarzschild radius (Rs) at mass x1
+const BASE_DT = 0.0008
+const MAX_PARTICLES = 1500
+
+const EXPERIMENTS = {
+  fall: {
+    label: 'Fall in',
+    text: 'Dropped from rest, so it has no sideways speed to keep it away. Gravity pulls it straight into the horizon.',
+  },
+  circular: {
+    label: 'Circular orbit',
+    text: 'Launched sideways at exactly v = sqrt(GM/r). Gravity bends its path into a circle, so it never gets closer or further.',
+  },
+  escape: {
+    label: 'Escape',
+    text: 'Launched at 1.1 x the escape speed, v = sqrt(2GM/r). It is climbing out faster than gravity can slow it, so it never comes back.',
+  },
+  ellipse: {
+    label: 'Elliptical orbit',
+    text: 'Launched sideways at 80% of circular speed. Too slow to stay circular, so it swings in close and back out again.',
+  },
+}
+
+const hud = {
+  position: 'absolute',
+  fontFamily: 'monospace',
+  fontSize: 12,
+  color: 'rgba(255,255,255,0.75)',
+  background: 'rgba(0,0,0,0.55)',
+  border: '1px solid rgba(255,255,255,0.12)',
+  borderRadius: 6,
+  padding: '10px 12px',
+  lineHeight: 1.6,
+}
+
+const button = (active) => ({
+  fontFamily: 'monospace',
+  fontSize: 12,
+  color: active ? '#000' : 'rgba(255,255,255,0.8)',
+  background: active ? 'rgba(255,255,255,0.85)' : 'rgba(255,255,255,0.08)',
+  border: '1px solid rgba(255,255,255,0.2)',
+  borderRadius: 4,
+  padding: '5px 10px',
+  cursor: 'pointer',
+})
+
+const fmt = (n, d = 1) => (Number.isFinite(n) ? n.toFixed(d) : '—')
+
 export default function App() {
   const mountRef = useRef(null)
+  const api = useRef(null)
+  const [info, setInfo] = useState({ active: 0, swallowed: 0, tracked: null, drag: null })
+  const [paused, setPaused] = useState(false)
+  const [speed, setSpeed] = useState(1)
+  const [mass, setMass] = useState(1)
+  const [trails, setTrails] = useState(true)
+  const [rings, setRings] = useState(true)
+  const [showLearn, setShowLearn] = useState(true)
+  const [lesson, setLesson] = useState(null)
 
   useEffect(() => {
     const mount = mountRef.current
@@ -29,14 +89,33 @@ export default function App() {
     controls.enableDamping = true
     controls.mouseButtons = {
       MIDDLE: THREE.MOUSE.PAN,
-      RIGHT: THREE.MOUSE.ROTATE
+      RIGHT: THREE.MOUSE.ROTATE,
     }
 
-    // Black hole — pure black sphere acts as occluder, creating the shadow effect
-    const blackHoleGeo = new THREE.SphereGeometry(28, 64, 64)
-    const blackHoleMat = new THREE.MeshBasicMaterial({ color: 0x000000 })
-    const blackHole = new THREE.Mesh(blackHoleGeo, blackHoleMat)
+    // Black hole — pure black sphere acts as occluder, creating the shadow effect.
+    // Built at unit horizon radius and scaled, because Rs grows linearly with mass.
+    const blackHole = new THREE.Mesh(
+      new THREE.SphereGeometry(1, 64, 64),
+      new THREE.MeshBasicMaterial({ color: 0x000000 })
+    )
     scene.add(blackHole)
+
+    // Reference circles from General Relativity: horizon (1 Rs), photon sphere (1.5 Rs), ISCO (3 Rs)
+    const ringGroup = new THREE.Group()
+    const makeRing = (radiusInRs, color) => {
+      const pts = []
+      for (let i = 0; i <= 128; i++) {
+        const a = (i / 128) * Math.PI * 2
+        pts.push(new THREE.Vector3(Math.cos(a) * radiusInRs, 0, Math.sin(a) * radiusInRs))
+      }
+      return new THREE.LineLoop(
+        new THREE.BufferGeometry().setFromPoints(pts),
+        new THREE.LineBasicMaterial({ color, transparent: true, opacity: 0.55 })
+      )
+    }
+    ringGroup.add(makeRing(1.5, 0xffb347))
+    ringGroup.add(makeRing(3, 0x4fd1c5))
+    scene.add(ringGroup)
 
     // Star field — kept dim so it doesn't compete with the bloom
     const starsGeo = new THREE.BufferGeometry()
@@ -58,76 +137,136 @@ export default function App() {
     arrowHelper.visible = false
     scene.add(arrowHelper)
 
-    // Invisible plane for raycasting mouse clicks into world space
-    const spawnPlane = new THREE.Mesh(
-      new THREE.PlaneGeometry(10000, 10000),
-      new THREE.MeshBasicMaterial({ visible: false, side: THREE.DoubleSide })
-    )
-    spawnPlane.rotation.x = -Math.PI / 2
-    scene.add(spawnPlane)
-
-    // Physics constants — scaled for simulation units, not real SI values
-    const G = 50000
-    const BLACK_HOLE_MASS = 100000
+    const params = { paused: false, speed: 1, mass: 1, trails: true }
     const particles = []
+    let swallowed = 0
+    let tracked = null
 
-    function spawnParticle(worldPos, velocity) {
-      let x, y, z, vx, vy, vz
+    const GM = () => G * BLACK_HOLE_MASS * params.mass
+    const horizon = () => BASE_HORIZON * params.mass
+
+    function applyMass() {
+      const r = horizon()
+      blackHole.scale.setScalar(r)
+      ringGroup.scale.setScalar(r)
+    }
+    applyMass()
+
+    function removeParticle(p) {
+      scene.remove(p.mesh)
+      scene.remove(p.trail)
+      p.mesh.geometry.dispose()
+      p.mesh.material.dispose()
+      p.trail.geometry.dispose()
+      p.trail.material.dispose()
+    }
+
+    function spawnParticle(worldPos, velocity, opts = {}) {
+      if (particles.filter(p => p.active).length >= MAX_PARTICLES) return null
       const isUserSpawned = worldPos !== null
+      let x, y, z, vx, vy, vz
 
       if (!isUserSpawned) {
         // Circular orbital speed v = sqrt(GM/r) gives stable orbits at any radius
         const angle = Math.random() * Math.PI * 2
-        const distance = Math.random() * 90 + 35
+        const distance = Math.random() * 90 + 35 * params.mass
         x = Math.cos(angle) * distance
         y = (Math.random() - 0.5) * 6
         z = Math.sin(angle) * distance
-        const speed = Math.sqrt(G * BLACK_HOLE_MASS / distance)
+        const speed = Math.sqrt(GM() / distance)
         vx = -Math.sin(angle) * speed
         vy = (Math.random() - 0.5) * speed * 0.01
         vz = Math.cos(angle) * speed
       } else {
-        x = worldPos.x
-        y = worldPos.y
-        z = worldPos.z
-        vx = velocity.x
-        vy = velocity.y
-        vz = velocity.z
+        x = worldPos.x; y = worldPos.y; z = worldPos.z
+        vx = velocity.x; vy = velocity.y; vz = velocity.z
       }
 
       const size = isUserSpawned ? 3 : Math.random() * 0.7 + 0.3
       const color = isUserSpawned ? 0xffff00 : 0xffffff
-      const geo = new THREE.SphereGeometry(size, 8, 8)
-      const mat = new THREE.MeshBasicMaterial({ color })
-      const mesh = new THREE.Mesh(geo, mat)
+      const mesh = new THREE.Mesh(
+        new THREE.SphereGeometry(size, 8, 8),
+        new THREE.MeshBasicMaterial({ color })
+      )
       mesh.position.set(x, y, z)
       scene.add(mesh)
 
       const trailGeo = new THREE.BufferGeometry()
-      const trailPositions = new Float32Array(60 * 3)
-      trailGeo.setAttribute('position', new THREE.BufferAttribute(trailPositions, 3))
+      trailGeo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(60 * 3), 3))
       trailGeo.setDrawRange(0, 0)
       const trail = new THREE.Line(trailGeo, new THREE.LineBasicMaterial({
-        color: isUserSpawned ? 0xffff00 : 0xffffff,
+        color: opts.color ?? color,
         transparent: true,
-        opacity: 0.4
+        opacity: 0.4,
       }))
+      trail.visible = params.trails
       scene.add(trail)
 
-      particles.push({
+      const p = {
         mesh, trail, trailPoints: [],
         velocity: new THREE.Vector3(vx, vy, vz),
-        mass: Math.random() * 2 + 1,
         active: true,
-        isUserSpawned
-      })
+        isUserSpawned,
+        age: 0,
+        orbits: 0,
+        lastAngle: Math.atan2(z, x),
+      }
+      particles.push(p)
+      return p
     }
 
-    for (let i = 0; i < 300; i++) spawnParticle(null, null)
+    function track(p) {
+      if (tracked && tracked !== p && tracked.isUserSpawned) tracked.mesh.material.color.set(0xffff00)
+      tracked = p
+      if (p) p.mesh.material.color.set(0x4fd1c5)
+    }
+
+    function addDisk(n) {
+      for (let i = 0; i < n; i++) spawnParticle(null, null)
+    }
+
+    function clearAll() {
+      particles.forEach(removeParticle)
+      particles.length = 0
+      tracked = null
+      swallowed = 0
+    }
+
+    function meteorShower() {
+      // Come in from far away with a random sideways offset (impact parameter):
+      // small offsets get captured, large ones whip past and leave.
+      for (let i = 0; i < 40; i++) {
+        const dir = new THREE.Vector3(Math.random() - 0.5, (Math.random() - 0.5) * 0.2, Math.random() - 0.5).normalize()
+        const pos = dir.clone().multiplyScalar(350)
+        const side = new THREE.Vector3().crossVectors(dir, new THREE.Vector3(0, 1, 0)).normalize()
+        const target = side.multiplyScalar((Math.random() - 0.5) * 220)
+        const vel = target.sub(pos).normalize().multiplyScalar(Math.sqrt(GM() / 350) * 1.1)
+        spawnParticle(pos, vel, { color: 0xff8a65 })
+      }
+    }
+
+    function experiment(kind) {
+      const r = 150 * params.mass
+      const pos = new THREE.Vector3(r, 0, 0)
+      const vc = Math.sqrt(GM() / r)
+      const dir = new THREE.Vector3(0, 0, 1)
+      let vel
+      if (kind === 'fall') vel = new THREE.Vector3()
+      else if (kind === 'circular') vel = dir.multiplyScalar(vc)
+      else if (kind === 'escape') vel = dir.multiplyScalar(vc * Math.SQRT2 * 1.1)
+      else vel = dir.multiplyScalar(vc * 0.8)
+      const p = spawnParticle(pos, vel)
+      if (p) {
+        // Camera looks down on the orbital plane so the shape of the path is easy to read
+        camera.position.set(0, 450 * params.mass, 150)
+        track(p)
+      }
+    }
 
     function mouseToWorld(event) {
-      const ndcX = (event.clientX / mount.clientWidth) * 2 - 1
-      const ndcY = -(event.clientY / mount.clientHeight) * 2 + 1
+      const rect = mount.getBoundingClientRect()
+      const ndcX = ((event.clientX - rect.left) / rect.width) * 2 - 1
+      const ndcY = -((event.clientY - rect.top) / rect.height) * 2 + 1
       const vector = new THREE.Vector3(ndcX, ndcY, 0.5)
       vector.unproject(camera)
       const dir = vector.sub(camera.position).normalize()
@@ -135,12 +274,26 @@ export default function App() {
       return camera.position.clone().add(dir.multiplyScalar(distToOrigin))
     }
 
+    // Live numbers for a drag: how fast, compared with the speeds that matter at that radius
+    function launchInfo(startWorld, velocity) {
+      const r = startWorld.length()
+      const gm = GM()
+      return {
+        speed: velocity.length(),
+        circular: Math.sqrt(gm / r),
+        escape: Math.sqrt((2 * gm) / r),
+      }
+    }
+
     let isDragging = false
     let dragStart = null
     let dragStartWorld = null
+    let dragInfo = null
+
+    const overHud = e => e.target.closest && e.target.closest('[data-hud]')
 
     function onMouseDown(e) {
-      if (e.button !== 0) return
+      if (e.button !== 0 || overHud(e)) return
       isDragging = false
       dragStart = { x: e.clientX, y: e.clientY }
       dragStartWorld = mouseToWorld(e)
@@ -156,27 +309,35 @@ export default function App() {
         const dir = currentWorld.clone().sub(dragStartWorld)
         const length = dir.length()
         if (length > 0) {
+          const li = launchInfo(dragStartWorld, dir.clone().multiplyScalar(50))
+          dragInfo = li
+          // Green = bound orbit, yellow = near circular, red = will escape
+          const col = li.speed >= li.escape ? 0xff5555 : Math.abs(li.speed / li.circular - 1) < 0.1 ? 0x4fd1c5 : 0xffff00
           arrowHelper.visible = true
           arrowHelper.position.copy(dragStartWorld)
           arrowHelper.setDirection(dir.clone().normalize())
           arrowHelper.setLength(length, 4, 2)
+          arrowHelper.setColor(col)
         }
       }
     }
 
     function onMouseUp(e) {
       if (e.button !== 0 || !dragStart || !dragStartWorld) return
+      let p
       if (isDragging) {
         const currentWorld = mouseToWorld(e)
         const velocity = currentWorld.clone().sub(dragStartWorld).multiplyScalar(50)
-        spawnParticle(dragStartWorld, velocity)
+        p = spawnParticle(dragStartWorld, velocity)
       } else {
-        spawnParticle(dragStartWorld, new THREE.Vector3(0, 0, 0))
+        p = spawnParticle(dragStartWorld, new THREE.Vector3(0, 0, 0))
       }
+      if (p) track(p)
       arrowHelper.visible = false
       dragStart = null
       dragStartWorld = null
       isDragging = false
+      dragInfo = null
     }
 
     window.addEventListener('mousedown', onMouseDown)
@@ -185,34 +346,85 @@ export default function App() {
 
     const composer = new EffectComposer(renderer)
     composer.addPass(new RenderPass(scene, camera))
-    composer.addPass(new UnrealBloomPass(
-      new THREE.Vector2(W, H),
-      0.6, 0.2, 0.2
-    ))
+    composer.addPass(new UnrealBloomPass(new THREE.Vector2(W, H), 0.6, 0.2, 0.2))
 
-    const animate = () => {
-      requestAnimationFrame(animate)
-      const dt = 0.0008
+    addDisk(300)
 
+    function step(dt) {
+      const gm = GM()
+      const rh = horizon()
       for (let i = 0; i < particles.length; i++) {
         const p = particles[i]
         if (!p.active) continue
-
         const pos = p.mesh.position
         const dist = pos.length()
 
-        if (dist < 28) {
+        if (dist < rh) {
           p.active = false
+          p.endedAfter = p.age
+          swallowed++
           scene.remove(p.mesh)
           scene.remove(p.trail)
           continue
         }
 
-        const forceMag = G * BLACK_HOLE_MASS * p.mass / (dist * dist)
-        const acc = pos.clone().normalize().multiplyScalar(-forceMag / p.mass)
-        p.velocity.addScaledVector(acc, dt)
-        p.mesh.position.addScaledVector(p.velocity, dt)
+        // Newton: a = GM / r^2 toward the centre (the particle's own mass cancels out)
+        p.velocity.addScaledVector(pos.clone().normalize(), -(gm / (dist * dist)) * dt)
+        pos.addScaledVector(p.velocity, dt)
+        p.age += dt
 
+        if (p === tracked) {
+          const a = Math.atan2(pos.z, pos.x)
+          let d = a - p.lastAngle
+          if (d > Math.PI) d -= Math.PI * 2
+          if (d < -Math.PI) d += Math.PI * 2
+          p.orbits += Math.abs(d) / (Math.PI * 2)
+          p.lastAngle = a
+        }
+      }
+    }
+
+    function describe(p) {
+      if (!p) return null
+      const gm = GM()
+      const rh = horizon()
+      if (!p.active) {
+        return { gone: true, text: `Swallowed after ${fmt(p.endedAfter * 1000, 0)} time units and ${fmt(p.orbits, 2)} orbits.` }
+      }
+      const pos = p.mesh.position
+      const r = pos.length()
+      const v = p.velocity.length()
+      const energy = (v * v) / 2 - gm / r
+      const h = new THREE.Vector3().crossVectors(pos, p.velocity).length()
+      const ecc = Math.sqrt(Math.max(0, 1 + (2 * energy * h * h) / (gm * gm)))
+      const periapsis = (h * h) / (gm * (1 + ecc))
+      let verdict
+      if (energy >= 0 && periapsis > rh && p.velocity.dot(pos) > 0) verdict = 'Escaping: it has more than escape speed and is moving away.'
+      else if (periapsis <= rh) verdict = 'On a collision course: its closest approach is inside the horizon.'
+      else if (energy >= 0) verdict = 'Flyby: it will swing past once, then leave.'
+      else if (ecc < 0.1) verdict = 'Stable, nearly circular orbit.'
+      else verdict = 'Bound elliptical orbit: it keeps looping back.'
+      return {
+        gone: false,
+        r: r / rh,
+        v, circular: Math.sqrt(gm / r), escape: Math.sqrt((2 * gm) / r),
+        ecc, orbits: p.orbits, verdict,
+      }
+    }
+
+    const animate = () => {
+      requestAnimationFrame(animate)
+
+      if (!params.paused) {
+        const sub = Math.ceil(params.speed)
+        for (let s = 0; s < sub; s++) step((BASE_DT * params.speed) / sub)
+      }
+
+      for (let i = 0; i < particles.length; i++) {
+        const p = particles[i]
+        if (!p.active) continue
+        p.trail.visible = params.trails
+        if (params.paused) continue
         p.trailPoints.push(p.mesh.position.clone())
         if (p.trailPoints.length > 60) p.trailPoints.shift()
         const positions = p.trail.geometry.attributes.position.array
@@ -225,8 +437,7 @@ export default function App() {
         p.trail.geometry.setDrawRange(0, p.trailPoints.length)
 
         if (!p.isUserSpawned) {
-          const spd = p.velocity.length()
-          const t = Math.min(spd / 20, 1)
+          const t = Math.min(p.velocity.length() / 20, 1)
           p.mesh.material.color.setScalar(Math.max(0.5, 0.3 + t * 0.7))
         }
       }
@@ -234,8 +445,26 @@ export default function App() {
       controls.update()
       composer.render()
     }
-
     animate()
+
+    const timer = setInterval(() => {
+      setInfo({
+        active: particles.filter(p => p.active).length,
+        swallowed,
+        tracked: describe(tracked),
+        drag: dragInfo,
+      })
+    }, 150)
+
+    api.current = {
+      setPaused: v => { params.paused = v },
+      setSpeed: v => { params.speed = v },
+      setMass: v => { params.mass = v; applyMass() },
+      setTrails: v => { params.trails = v },
+      setRings: v => { ringGroup.visible = v },
+      addDisk, clearAll, meteorShower, experiment,
+      reset: () => { clearAll(); addDisk(300) },
+    }
 
     const handleResize = () => {
       const w = mount.clientWidth
@@ -248,6 +477,7 @@ export default function App() {
     window.addEventListener('resize', handleResize)
 
     return () => {
+      clearInterval(timer)
       window.removeEventListener('resize', handleResize)
       window.removeEventListener('mousedown', onMouseDown)
       window.removeEventListener('mousemove', onMouseMove)
@@ -258,19 +488,94 @@ export default function App() {
     }
   }, [])
 
+  const t = info.tracked
+  const d = info.drag
+
   return (
     <div style={{ position: 'fixed', top: 0, left: 0, width: '100%', height: '100%', background: '#000' }}>
       <div ref={mountRef} style={{ width: '100%', height: '100%' }} />
-      <div style={{
-        position: 'absolute', top: 16, left: 16,
-        color: 'rgba(255,255,255,0.5)',
-        fontFamily: 'monospace', fontSize: 13,
-        pointerEvents: 'none'
+
+      <div style={{ ...hud, top: 16, left: 16, pointerEvents: 'none', maxWidth: 270 }}>
+        <div>LEFT CLICK — drop a particle</div>
+        <div>LEFT DRAG — launch it (arrow colour: <span style={{ color: '#4fd1c5' }}>circular</span> / <span style={{ color: '#ff5555' }}>escapes</span>)</div>
+        <div>RIGHT DRAG — rotate · SCROLL — zoom</div>
+        <div style={{ marginTop: 8 }}>
+          <span style={{ color: '#ffb347' }}>●</span> photon sphere 1.5 Rs · <span style={{ color: '#4fd1c5' }}>●</span> ISCO 3 Rs
+        </div>
+        <div style={{ opacity: 0.55 }}>Rings are General Relativity markers; the physics here is Newtonian.</div>
+      </div>
+
+      {d && (
+        <div data-hud style={{ ...hud, top: 16, left: '50%', transform: 'translateX(-50%)' }}>
+          launch speed {fmt(d.speed, 0)} · circular {fmt(d.circular, 0)} · escape {fmt(d.escape, 0)}
+          {' — '}
+          {d.speed >= d.escape ? 'will escape' : Math.abs(d.speed / d.circular - 1) < 0.1 ? 'near-circular orbit' : d.speed < d.circular ? 'too slow to stay circular' : 'elliptical orbit'}
+        </div>
+      )}
+
+      <div data-hud style={{ ...hud, top: 16, right: 16, width: 300 }}>
+        <div style={{ color: '#fff', marginBottom: 4 }}>
+          Tracked particle <span style={{ opacity: 0.5 }}>(your last launch)</span>
+        </div>
+        {!t && <div style={{ opacity: 0.6 }}>Click or drag in space to launch one, or run an experiment below.</div>}
+        {t && t.gone && <div>{t.text}</div>}
+        {t && !t.gone && (
+          <>
+            <div>distance {fmt(t.r, 2)} Rs</div>
+            <div>speed {fmt(t.v, 0)} (circular {fmt(t.circular, 0)}, escape {fmt(t.escape, 0)})</div>
+            <div>eccentricity {fmt(t.ecc, 2)} · orbits {fmt(t.orbits, 2)}</div>
+            <div style={{ color: '#4fd1c5', marginTop: 4 }}>{t.verdict}</div>
+          </>
+        )}
+        <div style={{ marginTop: 8, opacity: 0.55 }}>
+          {info.active} in flight · {info.swallowed} swallowed
+        </div>
+      </div>
+
+      {showLearn && (
+        <div data-hud style={{ ...hud, top: 190, right: 16, width: 300 }}>
+          <div style={{ color: '#fff', marginBottom: 4 }}>
+            {lesson ? EXPERIMENTS[lesson].label : 'What you are seeing'}
+          </div>
+          {lesson ? (
+            <div>{EXPERIMENTS[lesson].text}</div>
+          ) : (
+            <>
+              <div>Gravity pulls with a = GM / r². Closer means stronger.</div>
+              <div>Orbiting speed is v = √(GM/r): closer in, faster round.</div>
+              <div>Escape speed is √2 times that. Beat it and you never return.</div>
+              <div>The horizon radius Rs grows in proportion to mass. Try the mass slider.</div>
+            </>
+          )}
+        </div>
+      )}
+
+      <div data-hud style={{
+        ...hud, bottom: 16, left: '50%', transform: 'translateX(-50%)',
+        display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center', justifyContent: 'center', maxWidth: '94vw',
       }}>
-        <div>LEFT CLICK — spawn stationary particle</div>
-        <div>LEFT DRAG — launch with velocity</div>
-        <div>RIGHT DRAG — rotate camera</div>
-        <div>SCROLL — zoom</div>
+        <span style={{ opacity: 0.55 }}>Experiments</span>
+        {Object.entries(EXPERIMENTS).map(([k, e]) => (
+          <button key={k} style={button(lesson === k)} onClick={() => { setLesson(k); api.current.experiment(k) }}>{e.label}</button>
+        ))}
+        <span style={{ opacity: 0.3 }}>|</span>
+        <button style={button(false)} onClick={() => api.current.meteorShower()}>Meteor shower</button>
+        <button style={button(false)} onClick={() => api.current.addDisk(100)}>+100 disk</button>
+        <button style={button(false)} onClick={() => { setLesson(null); api.current.reset() }}>Reset</button>
+        <button style={button(false)} onClick={() => api.current.clearAll()}>Clear</button>
+        <span style={{ opacity: 0.3 }}>|</span>
+        <button style={button(paused)} onClick={() => { api.current.setPaused(!paused); setPaused(!paused) }}>{paused ? 'Play' : 'Pause'}</button>
+        <label>speed {speed}x{' '}
+          <input type="range" min="0.25" max="4" step="0.25" value={speed}
+            onChange={e => { setSpeed(+e.target.value); api.current.setSpeed(+e.target.value) }} />
+        </label>
+        <label>mass {mass}x{' '}
+          <input type="range" min="0.5" max="3" step="0.25" value={mass}
+            onChange={e => { setMass(+e.target.value); api.current.setMass(+e.target.value) }} />
+        </label>
+        <button style={button(trails)} onClick={() => { api.current.setTrails(!trails); setTrails(!trails) }}>Trails</button>
+        <button style={button(rings)} onClick={() => { api.current.setRings(!rings); setRings(!rings) }}>Rings</button>
+        <button style={button(showLearn)} onClick={() => setShowLearn(!showLearn)}>Learn</button>
       </div>
     </div>
   )

@@ -12,14 +12,23 @@ Particles orbit the black hole under Newtonian gravity, spiral inward as they lo
 - Bloom post-processing simulates the intense radiation emitted by the accretion disk
 - The black hole shadow is a pure black sphere acting as an occluder — no shader needed
 
+## Learn by experimenting
+
+- **Experiments** drop a tracked particle into a known situation: fall in, circular orbit, escape, elliptical orbit. A plain-English explanation appears with each.
+- **Live readout** shows the tracked particle's distance in Schwarzschild radii, its speed against circular and escape speed, its eccentricity, and a verdict (stable orbit, flyby, escaping, collision course).
+- **Launch preview**: while dragging, the arrow turns teal for a near-circular orbit and red if the launch will escape.
+- **Mass slider**: the event horizon radius grows in proportion to mass, and every orbit changes with it.
+- **Reference rings** mark the photon sphere (1.5 Rs) and the innermost stable circular orbit (3 Rs). These come from General Relativity; the simulation itself is Newtonian, so particles can orbit inside the ISCO here even though real ones could not.
+
 ## Controls
 
 | Input | Action |
 |---|---|
-| Left click | Spawn stationary particle — falls straight into the black hole |
-| Left drag | Launch particle with custom velocity — direction and length set the trajectory |
+| Left click | Drop a stationary particle: it falls straight in |
+| Left drag | Launch a particle; arrow length and direction set the velocity |
 | Right drag | Rotate camera |
 | Scroll | Zoom |
+| Panel buttons | Experiments, meteor shower, extra disk particles, pause, speed, mass, trails, rings |
 
 ## Running locally
 
