@@ -59,7 +59,7 @@ const fmt = (n, d = 1) => (Number.isFinite(n) ? n.toFixed(d) : '—')
 export default function App() {
   const mountRef = useRef(null)
   const api = useRef(null)
-  const [info, setInfo] = useState({ active: 0, swallowed: 0, tracked: null, drag: null })
+  const [info, setInfo] = useState({ active: 0, swallowed: 0, tracked: null, drag: null, mass: 1, solved: 0 })
   const [paused, setPaused] = useState(false)
   const [speed, setSpeed] = useState(1)
   const [mass, setMass] = useState(1)
@@ -67,6 +67,7 @@ export default function App() {
   const [rings, setRings] = useState(true)
   const [showLearn, setShowLearn] = useState(true)
   const [lesson, setLesson] = useState(null)
+  const [grow, setGrow] = useState(false)
 
   useEffect(() => {
     const mount = mountRef.current
@@ -137,10 +138,11 @@ export default function App() {
     arrowHelper.visible = false
     scene.add(arrowHelper)
 
-    const params = { paused: false, speed: 1, mass: 1, trails: true }
+    const params = { paused: false, speed: 1, mass: 1, trails: true, grow: false }
     const particles = []
     let swallowed = 0
     let tracked = null
+    let solved = 0
 
     const GM = () => G * BLACK_HOLE_MASS * params.mass
     const horizon = () => BASE_HORIZON * params.mass
@@ -182,7 +184,7 @@ export default function App() {
         vx = velocity.x; vy = velocity.y; vz = velocity.z
       }
 
-      const size = isUserSpawned ? 3 : Math.random() * 0.7 + 0.3
+      const size = opts.size ?? (isUserSpawned ? 3 : Math.random() * 0.7 + 0.3)
       const color = isUserSpawned ? 0xffff00 : 0xffffff
       const mesh = new THREE.Mesh(
         new THREE.SphereGeometry(size, 8, 8),
@@ -243,6 +245,22 @@ export default function App() {
         const vel = target.sub(pos).normalize().multiplyScalar(Math.sqrt(GM() / 350) * 1.1)
         spawnParticle(pos, vel, { color: 0xff8a65 })
       }
+    }
+
+    // A star is a tight clump on a plunging orbit. Gravity pulls harder on its near side than its far side,
+    // so the clump is stretched into a stream: tidal disruption ("spaghettification").
+    function sendStar() {
+      const dir = new THREE.Vector3(Math.random() - 0.5, (Math.random() - 0.5) * 0.1, Math.random() - 0.5).normalize()
+      const r = 260 * params.mass
+      const centre = dir.clone().multiplyScalar(r)
+      const side = new THREE.Vector3().crossVectors(dir, new THREE.Vector3(0, 1, 0)).normalize()
+      const aim = side.multiplyScalar(horizon() * 1.2)
+      const vel = aim.sub(centre).normalize().multiplyScalar(Math.sqrt(GM() / r) * 0.9)
+      for (let i = 0; i < 60; i++) {
+        const jitter = new THREE.Vector3(Math.random() - 0.5, Math.random() - 0.5, Math.random() - 0.5).multiplyScalar(14)
+        spawnParticle(centre.clone().add(jitter), vel.clone(), { color: 0xffd54f, size: 1.4 })
+      }
+      camera.position.copy(centre.clone().multiplyScalar(1.3)).setY(120)
     }
 
     function experiment(kind) {
@@ -363,6 +381,7 @@ export default function App() {
           p.active = false
           p.endedAfter = p.age
           swallowed++
+          if (params.grow) { params.mass += 0.004; applyMass() }
           scene.remove(p.mesh)
           scene.remove(p.trail)
           continue
@@ -408,6 +427,7 @@ export default function App() {
         gone: false,
         r: r / rh,
         v, circular: Math.sqrt(gm / r), escape: Math.sqrt((2 * gm) / r),
+        clock: Math.sqrt(Math.max(0, 1 - rh / r)),
         ecc, orbits: p.orbits, verdict,
       }
     }
@@ -438,7 +458,10 @@ export default function App() {
 
         if (!p.isUserSpawned) {
           const t = Math.min(p.velocity.length() / 20, 1)
-          p.mesh.material.color.setScalar(Math.max(0.5, 0.3 + t * 0.7))
+          // Gravitational redshift: light from deep in the well loses energy and looks redder and dimmer
+          const red = Math.min(1, Math.max(0, (horizon() * 3) / p.mesh.position.length() - 0.6))
+          const b = Math.max(0.5, 0.3 + t * 0.7)
+          p.mesh.material.color.setRGB(b, b * (1 - red * 0.8), b * (1 - red))
         }
       }
 
@@ -448,10 +471,17 @@ export default function App() {
     animate()
 
     const timer = setInterval(() => {
+      const desc = describe(tracked)
+      // Challenge: three orbits, nearly circular, without falling in
+      if (desc && !desc.gone && !tracked.solved && tracked.orbits >= 3 && desc.ecc < 0.15) {
+        tracked.solved = true
+        solved++
+      }
       setInfo({
+        mass: params.mass, solved,
         active: particles.filter(p => p.active).length,
         swallowed,
-        tracked: describe(tracked),
+        tracked: desc,
         drag: dragInfo,
       })
     }, 150)
@@ -462,7 +492,8 @@ export default function App() {
       setMass: v => { params.mass = v; applyMass() },
       setTrails: v => { params.trails = v },
       setRings: v => { ringGroup.visible = v },
-      addDisk, clearAll, meteorShower, experiment,
+      setGrow: v => { params.grow = v },
+      addDisk, clearAll, meteorShower, experiment, sendStar,
       reset: () => { clearAll(); addDisk(300) },
     }
 
@@ -524,11 +555,13 @@ export default function App() {
             <div>distance {fmt(t.r, 2)} Rs</div>
             <div>speed {fmt(t.v, 0)} (circular {fmt(t.circular, 0)}, escape {fmt(t.escape, 0)})</div>
             <div>eccentricity {fmt(t.ecc, 2)} · orbits {fmt(t.orbits, 2)}</div>
+            <div>its clock runs at {fmt(t.clock * 100, 0)}% of a far-away clock</div>
             <div style={{ color: '#4fd1c5', marginTop: 4 }}>{t.verdict}</div>
           </>
         )}
         <div style={{ marginTop: 8, opacity: 0.55 }}>
           {info.active} in flight · {info.swallowed} swallowed
+          <div>Challenge: 3 near-circular orbits without falling in · solved {info.solved}</div>
         </div>
       </div>
 
@@ -545,6 +578,7 @@ export default function App() {
               <div>Orbiting speed is v = √(GM/r): closer in, faster round.</div>
               <div>Escape speed is √2 times that. Beat it and you never return.</div>
               <div>The horizon radius Rs grows in proportion to mass. Try the mass slider.</div>
+              <div>Send a star and watch tides stretch it into a stream. Near the hole, clocks run slow and light turns red.</div>
             </>
           )}
         </div>
@@ -560,6 +594,7 @@ export default function App() {
         ))}
         <span style={{ opacity: 0.3 }}>|</span>
         <button style={button(false)} onClick={() => api.current.meteorShower()}>Meteor shower</button>
+        <button style={button(false)} onClick={() => api.current.sendStar()}>Send a star</button>
         <button style={button(false)} onClick={() => api.current.addDisk(100)}>+100 disk</button>
         <button style={button(false)} onClick={() => { setLesson(null); api.current.reset() }}>Reset</button>
         <button style={button(false)} onClick={() => api.current.clearAll()}>Clear</button>
@@ -569,10 +604,11 @@ export default function App() {
           <input type="range" min="0.25" max="4" step="0.25" value={speed}
             onChange={e => { setSpeed(+e.target.value); api.current.setSpeed(+e.target.value) }} />
         </label>
-        <label>mass {mass}x{' '}
-          <input type="range" min="0.5" max="3" step="0.25" value={mass}
+        <label>mass {fmt(grow ? info.mass : mass, 2)}x{' '}
+          <input type="range" min="0.5" max="3" step="0.25" value={grow ? Math.min(3, info.mass) : mass}
             onChange={e => { setMass(+e.target.value); api.current.setMass(+e.target.value) }} />
         </label>
+        <button style={button(grow)} onClick={() => { api.current.setGrow(!grow); setGrow(!grow) }}>Hole grows</button>
         <button style={button(trails)} onClick={() => { api.current.setTrails(!trails); setTrails(!trails) }}>Trails</button>
         <button style={button(rings)} onClick={() => { api.current.setRings(!rings); setRings(!rings) }}>Rings</button>
         <button style={button(showLearn)} onClick={() => setShowLearn(!showLearn)}>Learn</button>
